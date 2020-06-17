@@ -41,6 +41,26 @@
  * MISO - PGD (4)
  * SCLK - PDC (5)
  * MOSI - AUX (6)
+ * 
+ * Enhanced pinouts showing low and high voltage options.
+ * 
+ * +--------------------+----------------------+
+ * |       Pickit2      |          AVR         |
+ * +=======+============+===========+==========+
+ * | Pin # |  Pin Name  |  LVSP Pin | HVSP Pin |
+ * +-------+------------+-----------+----------+
+ * |   1   |     Vpp    |   ~RESET  |    Vpp   |
+ * +-------+------------+-----------+----------+
+ * |   2   | Vdd Target |    Vcc    |    Vcc   |
+ * +-------+------------+-----------+----------+
+ * |   3   |     Gnd    | Vss / Gnd |    Gnd   |
+ * +-------+------------+-----------+----------+
+ * |   4   |     PGD    |    MISO   |    SII   |
+ * +-------+------------+-----------+----------+
+ * |   5   |     PGC    |    SCK    |    SDO   |
+ * +-------+------------+-----------+----------+
+ * |   6   |     Aux    |    MOSI   |    SDI   |
+ * +-------+------------+-----------+----------+
  */
 
 #include "ac_cfg.h"
@@ -60,31 +80,39 @@
 #if (defined(WIN32NATIVE) && defined(HAVE_LIBHID))
 #include <windows.h>
 #if defined(HAVE_DDK_HIDSDI_H)
-#  include <ddk/hidsdi.h>
+#include <ddk/hidsdi.h>
 #elif defined(HAVE_HIDSDI_H)
-#  include <hidsdi.h>
+#include <hidsdi.h>
 #else
-#  include "my_ddk_hidsdi.h"
+#include "my_ddk_hidsdi.h"
 #endif
 #include <setupapi.h>
 #else
 #if defined(HAVE_USB_H)
-#  include <usb.h>
+#include <usb.h>
 #elif defined(HAVE_LUSB0_USB_H)
-#  include <lusb0_usb.h>
+#include <lusb0_usb.h>
 #else
-#  error "libusb needs either <usb.h> or <lusb0_usb.h>"
+#error "libusb needs either <usb.h> or <lusb0_usb.h>"
 #endif
 #endif
 
 #if 0
-#define DEBUG(...) do { avrdude_message(MSG_DEBUG, __VA_ARGS__); } while(0) 
+#define DEBUG(...)                               \
+    do                                           \
+    {                                            \
+        avrdude_message(MSG_DEBUG, __VA_ARGS__); \
+    } while (0)
 #else
 #define DEBUG(...) ((void)0)
 #endif
 
 #if 0
-#define DEBUGRECV(...) do { avrdude_message(MSG_DEBUG, __VA_ARGS__); } while(0) 
+#define DEBUGRECV(...)                           \
+    do                                           \
+    {                                            \
+        avrdude_message(MSG_DEBUG, __VA_ARGS__); \
+    } while (0)
 #else
 #define DEBUGRECV(...) ((void)0)
 #endif
@@ -92,7 +120,7 @@
 #define PICKIT2_VID 0x04d8
 #define PICKIT2_PID 0x0033
 
-#define SPI_MAX_CHUNK (64 - 10)    // max packet size less the command overhead
+#define SPI_MAX_CHUNK (64 - 10) // max packet size less the command overhead
 
 // win32native only:
 #if (defined(WIN32NATIVE) && defined(HAVE_LIBHID))
@@ -104,18 +132,18 @@ const char *usb_strerror()
 #else
 static int usb_open_device(struct usb_dev_handle **dev, int vid, int pid);
 //#define INVALID_HANDLE_VALUE NULL
-#define USB_ERROR_NONE      0
-#define USB_ERROR_ACCESS    1
-#define USB_ERROR_NOTFOUND  2
-#define USB_ERROR_BUSY      16
-#define USB_ERROR_IO        5
-#endif  // WIN32NATIVE
+#define USB_ERROR_NONE 0
+#define USB_ERROR_ACCESS 1
+#define USB_ERROR_NOTFOUND 2
+#define USB_ERROR_BUSY 16
+#define USB_ERROR_IO 5
+#endif // WIN32NATIVE
 
 static int pickit2_write_report(PROGRAMMER *pgm, const unsigned char report[65]);
 static int pickit2_read_report(PROGRAMMER *pgm, unsigned char report[65]);
 
 #ifndef MIN
-#define MIN(X,Y) ((X) < (Y) ? (X) : (Y))
+#define MIN(X, Y) ((X) < (Y) ? (X) : (Y))
 #endif
 
 /*
@@ -126,48 +154,92 @@ struct pdata
 #if (defined(WIN32NATIVE) && defined(HAVE_LIBHID))
     HANDLE usb_handle, write_event, read_event;
 #else
-    struct usb_dev_handle *usb_handle;     // LIBUSB STUFF
+    struct usb_dev_handle *usb_handle; // LIBUSB STUFF
 #endif
-    uint8_t clock_period;  // SPI clock period in us
-    int transaction_timeout;    // usb trans timeout in ms
+    uint8_t clock_period;    // SPI clock period in us
+    int transaction_timeout; // usb trans timeout in ms
+    bool use_hvsp;           // use high voltage programming to erase chip
 };
 
 #define PDATA(pgm) ((struct pdata *)(pgm->cookie))
 
-#define CMD_NOP             0x5A
-#define CMD_GET_VERSION     0x76
-#define CMD_SET_VDD_4(v)    0xA0, (uint8_t)((v)*2048+672), (uint8_t)(((v)*2048+672)/256), (uint8_t)((v)*36)
-#define CMD_SET_VPP_4(v)    0xA1, 0x40, (uint8_t)((v)*18.61), (uint8_t)((v)*13)
-#define CMD_READ_VDD_VPP    0xA3
-#define CMD_EXEC_SCRIPT_2(len)  0xA6, (len)
-#define CMD_CLR_DLOAD_BUFF  0xA7
-#define CMD_DOWNLOAD_DATA_2(len)  0xA8, (len)
-#define CMD_CLR_ULOAD_BUFF  0xA9
-#define CMD_UPLOAD_DATA     0xAA
-#define CMD_UPLOAD_DATA_NO_LEN     0xAC
-#define CMD_END_OF_BUFFER   0xAD
+// Bit mapping for command Read_Status results.
+typedef union {
+    struct
+    {
+        uint8_t low;
+        uint8_t high;
+    } bytes;
+    struct
+    {
+        uint8_t vdd_gnd_on : 1;
+        uint8_t vdd_on : 1;
+        uint8_t vpp_gnd_on : 1;
+        uint8_t vpp_on : 1;
+        uint8_t vdd_error : 1;
+        uint8_t vpp_error : 1;
+        uint8_t button_pressed : 1;
+        uint8_t : 0;
+        uint8_t reset_since_last_status_read : 1;
+        uint8_t uart_enabled : 1;
+        uint8_t icd_transfer_timout_bus_error : 1;
+        uint8_t script_upload_full : 1;
+        uint8_t script_download_empty : 1;
+        uint8_t script_empty : 1;
+        uint8_t script_overflow_index_error : 1;
+        uint8_t download_buffer_overflow : 1;
+    } flags;
+} pickit2_status_t;
 
-#define SCR_VDD_ON          0xFF
-#define SCR_VDD_OFF         0xFE
-#define SCR_VPP_ON          0xFB
-#define SCR_VPP_OFF         0xFA
-#define SCR_VPP_PWM_ON      0xF9
-#define SCR_VPP_PWM_OFF     0xF8
-#define SCR_MCLR_GND_ON     0xF7
-#define SCR_MCLR_GND_OFF    0xF6
-#define SCR_BUSY_LED_ON     0xF5
-#define SCR_BUSY_LED_OFF    0xF4
-#define SCR_SET_ICSP_DELAY_2(us) 0xEA,(us)
-#define SCR_SET_PINS_2(dd, cd, dv, cv) 0xF3, (((cd)!=0) | (((dd)!=0)<<1) | (((cv)!=0)<<2) | (((dv)!=0)<<3))
-#define SCR_GET_PINS        0xDC
-#define SCR_LOOP_3(rel, cnt)    0xE9, rel, cnt
-#define SCR_DELAY_2(sec)    ((sec)>0.0054528?0xE8:0xE7), (uint8_t)((sec)>0.0054528?(.999+(sec)/.00546):(.999+(sec)/.0000213))
-#define SCR_SET_AUX_2(ad, av)   0xCF, (((ad)!=0) | (((av)!=0)<<1))
-#define SCR_SPI_SETUP_PINS_4    SCR_SET_PINS_2(1,0,0,0), SCR_SET_AUX_2(0,0)
-#define SCR_SPI             0xC3
-#define SCR_SPI_LIT_2(v)    0xC7,(v)
+#define CMD_NOP 0x5A
+#define CMD_GET_VERSION 0x76
+#define CMD_SET_VDD_4(v) 0xA0, (uint8_t)((v)*2048 + 672), (uint8_t)(((v)*2048 + 672) / 256), (uint8_t)((v)*36)
+#define CMD_SET_VPP_4(v) 0xA1, 0x40, (uint8_t)((v)*18.61), (uint8_t)((v)*13)
+#define CMD_READ_STATUS 0xA2
+#define CMD_READ_VDD_VPP 0xA3
+#define CMD_EXEC_SCRIPT_2(len) 0xA6, (len)
+#define CMD_CLR_DLOAD_BUFF 0xA7
+#define CMD_DOWNLOAD_DATA_2(len) 0xA8, (len)
+#define CMD_CLR_ULOAD_BUFF 0xA9
+#define CMD_UPLOAD_DATA 0xAA
+#define CMD_UPLOAD_DATA_NO_LEN 0xAC
+#define CMD_END_OF_BUFFER 0xAD
 
-static void pickit2_setup(PROGRAMMER * pgm)
+#define SCR_VDD_ON 0xFF
+#define SCR_VDD_OFF 0xFE
+#define SCR_VDD_GND_ON 0xFD
+#define SCR_VDD_GND_OFF 0xFC
+#define SCR_VPP_ON 0xFB
+#define SCR_VPP_OFF 0xFA
+#define SCR_VPP_PWM_ON 0xF9
+#define SCR_VPP_PWM_OFF 0xF8
+#define SCR_MCLR_GND_ON 0xF7
+#define SCR_MCLR_GND_OFF 0xF6
+#define SCR_BUSY_LED_ON 0xF5
+#define SCR_BUSY_LED_OFF 0xF4
+#define SCR_SET_ICSP_DELAY_2(us) 0xEA, (us)
+// SET PINS Parameters
+// dd - direction PGD / MOSI / SII (1 input, 0 output)
+// cd - direction PGC / SCK / SDO (1 input, 0 output)
+// dv - logic level PGD / MOSI / SII
+// cv - logic level PGC / SCK / SDO
+#define SCR_SET_PINS_2(dd, cd, dv, cv) 0xF3, (((cd) != 0) | (((dd) != 0) << 1) | (((cv) != 0) << 2) | (((dv) != 0) << 3))
+#define SCR_GET_PINS 0xDC
+#define SCR_LOOP_3(rel, cnt) 0xE9, rel, cnt
+// Each unit is 21.3μs, send 0 for 256 units (5.4ms)
+#define SCR_DELAY_SHORT(units) 0xE7, units
+// Minimum delay is 21.3us in steps of 21.3μs up to 5.4ms
+// Max is 1.397 seconds in steps of 5.46ms
+#define SCR_DELAY_2(sec) ((sec) > 0.0054528 ? 0xE8 : 0xE7), (uint8_t)((sec) > 0.0054528 ? (.999 + (sec) / .00546) : (.999 + (sec) / .0000213))
+// SET AUX Parameters
+// ad - direction Aux / MOSI / SDI (1 input, 0 output)
+// av - logic level Aux / MOSI / SDI
+#define SCR_SET_AUX_2(ad, av) 0xCF, (((ad) != 0) | (((av) != 0) << 1))
+#define SCR_SPI_SETUP_PINS_4 SCR_SET_PINS_2(1, 0, 0, 0), SCR_SET_AUX_2(0, 0)
+#define SCR_SPI 0xC3
+#define SCR_SPI_LIT_2(v) 0xC7, (v)
+
+static void pickit2_setup(PROGRAMMER *pgm)
 {
     if ((pgm->cookie = malloc(sizeof(struct pdata))) == 0)
     {
@@ -177,16 +249,16 @@ static void pickit2_setup(PROGRAMMER * pgm)
     }
     memset(pgm->cookie, 0, sizeof(struct pdata));
 
-    PDATA(pgm)->transaction_timeout = 1500;    // default value, may be overridden with -x timeout=ms
-    PDATA(pgm)->clock_period = 10;    // default value, may be overridden with -x clockrate=us or -B or -i
+    PDATA(pgm)->transaction_timeout = 1500; // default value, may be overridden with -x timeout=ms
+    PDATA(pgm)->clock_period = 10;          // default value, may be overridden with -x clockrate=us or -B or -i
 }
 
-static void pickit2_teardown(PROGRAMMER * pgm)
+static void pickit2_teardown(PROGRAMMER *pgm)
 {
     free(pgm->cookie);
 }
 
-static int pickit2_open(PROGRAMMER * pgm, char * port)
+static int pickit2_open(PROGRAMMER *pgm, char *port)
 {
 #if (defined(WIN32NATIVE) && defined(HAVE_LIBHID))
     PDATA(pgm)->usb_handle = open_hid(PICKIT2_VID, PICKIT2_PID);
@@ -201,12 +273,12 @@ static int pickit2_open(PROGRAMMER * pgm, char * port)
     else
     {
         // get the device description while we're at it
-        short buff[PGM_DESCLEN-1], i;
-        HidD_GetProductString(PDATA(pgm)->usb_handle, buff, PGM_DESCLEN-1);
+        short buff[PGM_DESCLEN - 1], i;
+        HidD_GetProductString(PDATA(pgm)->usb_handle, buff, PGM_DESCLEN - 1);
 
         // convert from wide chars, but do not overwrite trailing '\0'
         memset(&(pgm->type), 0, PGM_DESCLEN);
-        for (i = 0; i < (PGM_DESCLEN-1) && buff[i]; i++)
+        for (i = 0; i < (PGM_DESCLEN - 1) && buff[i]; i++)
         {
             pgm->type[i] = (char)buff[i]; // TODO what about little/big endian???
         }
@@ -233,8 +305,7 @@ static int pickit2_open(PROGRAMMER * pgm, char * port)
     return 0;
 }
 
-
-static void pickit2_close(PROGRAMMER * pgm)
+static void pickit2_close(PROGRAMMER *pgm)
 {
 #if (defined(WIN32NATIVE) && defined(HAVE_LIBHID))
     CloseHandle(PDATA(pgm)->usb_handle);
@@ -242,11 +313,253 @@ static void pickit2_close(PROGRAMMER * pgm)
     CloseHandle(PDATA(pgm)->write_event);
 #else
     usb_close(PDATA(pgm)->usb_handle);
-#endif  // WIN32NATIVE
+#endif // WIN32NATIVE
 }
 
+/*
+ * Reads the status bits from the pickit2 and outputs results.
+ * Doesn't set any globals as not needed yet.
+ */
+static int pickit2_read_status(PROGRAMMER *pgm)
+{
+    int errorCode = 0;
 
-static int pickit2_initialize(PROGRAMMER * pgm, AVRPART * p)
+    unsigned char reportReadStatus[65] = {0, CMD_READ_STATUS, CMD_END_OF_BUFFER};
+
+    if ((errorCode = pickit2_write_report(pgm, reportReadStatus)) < 0)
+    {
+        avrdude_message(MSG_INFO, "pickit2_write_report failed (Read Status - ec %d). %s\n", errorCode, usb_strerror());
+        return -1;
+    }
+
+    unsigned char report[65] = {0};
+    if ((errorCode = pickit2_read_report(pgm, report)) < 5)
+    {
+        avrdude_message(MSG_INFO, "pickit2_read_report failed (Read Status ec %d). %s\n", errorCode, usb_strerror());
+        return -1;
+    }
+
+    pickit2_status_t status;
+    status.bytes.low = report[1];
+    status.bytes.high = report[2];
+
+    avrdude_message(MSG_NOTICE, "%s: Pickit2 Status:\n", progname);
+    avrdude_message(MSG_NOTICE, "\tVdd Gnd On       : %d\n", status.flags.vdd_gnd_on);
+    avrdude_message(MSG_NOTICE, "\tVdd On           : %d\n", status.flags.vdd_on);
+    avrdude_message(MSG_NOTICE, "\tVdd Error        : %d\n", status.flags.vdd_error);
+    avrdude_message(MSG_NOTICE, "\tVpp Gnd On       : %d\n", status.flags.vpp_gnd_on);
+    avrdude_message(MSG_NOTICE, "\tVpp On           : %d\n", status.flags.vpp_on);
+    avrdude_message(MSG_NOTICE, "\tVpp Error        : %d\n", status.flags.vpp_error);
+    avrdude_message(MSG_NOTICE, "\tButton Pressed   : %d\n", status.flags.button_pressed);
+    avrdude_message(MSG_NOTICE, "\tUART enabled     : %d\n", status.flags.uart_enabled);
+    avrdude_message(MSG_NOTICE, "\tReset since last status read  : %d\n", status.flags.reset_since_last_status_read);
+    avrdude_message(MSG_NOTICE, "\tICD transfer timout/bus error : %d\n", status.flags.icd_transfer_timout_bus_error);
+    avrdude_message(MSG_NOTICE, "\tScript abort - upload full    : %d\n", status.flags.script_upload_full);
+    avrdude_message(MSG_NOTICE, "\tScript abort - download empty : %d\n", status.flags.script_download_empty);
+    avrdude_message(MSG_NOTICE, "\tScript run on empty script    : %d\n", status.flags.script_empty);
+    avrdude_message(MSG_NOTICE, "\tScript overflow / index error : %d\n", status.flags.script_overflow_index_error);
+    avrdude_message(MSG_NOTICE, "\tDownload buffer overflow      : %d\n", status.flags.download_buffer_overflow);
+
+    return 0;
+}
+/*
+ * Reads the Vdd and Vpp voltages from the pickit2
+ */
+static int pickit2_read_voltages(PROGRAMMER *pgm, float *vdd, float *vpp)
+{
+    int errorCode = 0;
+
+    unsigned char reportReadVolts[65] = {0, CMD_READ_VDD_VPP, CMD_END_OF_BUFFER};
+
+    if ((errorCode = pickit2_write_report(pgm, reportReadVolts)) < 0)
+    {
+        avrdude_message(MSG_INFO, "pickit2_write_report failed (Read VDD - ec %d). %s\n", errorCode, usb_strerror());
+        return -1;
+    }
+
+    unsigned char reportVolts[65] = {0};
+    if ((errorCode = pickit2_read_report(pgm, reportVolts)) < 5)
+    {
+        avrdude_message(MSG_INFO, "pickit2_read_report failed (Read VDD ec %d). %s\n", errorCode, usb_strerror());
+        return -1;
+    }
+
+    *vdd = (((reportVolts[2] << 8) + reportVolts[1]) / 65536.0) * 5.0;
+    *vpp = (((reportVolts[4] << 8) + reportVolts[3]) / 65536.0) * 13.7;
+
+    return 0;
+}
+
+static int pickit2_report_voltages(PROGRAMMER *pgm)
+{
+    float vdd, vpp;
+    int errorCode;
+
+    if ((errorCode = pickit2_read_voltages(pgm, &vdd, &vpp)) < 0)
+    {
+        return errorCode;
+    }
+    avrdude_message(MSG_NOTICE, "%s: Vdd is %.2f volts, Vpp is %.2f volts\n", progname, vdd, vpp);
+    return 0;
+}
+
+/*
+ High voltage serial programming initialisation.
+*/
+static int pickit2_hvsp_initialize(PROGRAMMER *pgm, AVRPART *p)
+{
+    int errorCode = 0;
+
+    // Hard coded check for Tiny25, 45 or 85
+    if ((strncmp(p->id, "t25", strlen("t25")) != 0) && (strncmp(p->id, "t45", strlen("t45")) != 0) && (strncmp(p->id, "t85", strlen("t85")) != 0))
+    {
+        avrdude_message(MSG_INFO, "high-voltage programming is not implemented for part \"%s\"\n",
+                        p->desc);
+        return -1;
+    }
+
+    avrdude_message(MSG_NOTICE, "%s: Using high voltage serial programming.\n", progname);
+
+    pickit2_read_status(pgm);
+    // Steps from ATtiny25/45/85 datasheet
+
+    // NB: This assumes device powered by Pickit2.
+    //     Does not check for a self powered device
+    unsigned char steps1_2[65] =
+        {
+            0,
+            // Define Target and programming voltages
+            CMD_SET_VDD_4(5),
+            CMD_SET_VPP_4(12),
+            //
+            CMD_EXEC_SCRIPT_2(16), // n bytes of script to run
+            // 1. Set Prog_enable pins SDI, SII & SDO to “000”
+            // RESET pin and V CC to 0V.
+            // SDI - Input, SII - Input, SDO - Output
+            SCR_SET_AUX_2(1, 0),        // SDI (2 bytes)
+            SCR_SET_PINS_2(1, 0, 0, 0), // SII & SDO (3 bytes)
+            SCR_VPP_OFF,                // RESET pin to float (1 byte)
+            SCR_VPP_PWM_OFF,            // Charge pump off (1 byte)
+            SCR_MCLR_GND_ON,            // RESET to GND (1 byte)
+            SCR_VDD_OFF,                // Vcc to float (1 byte)
+            SCR_VDD_GND_ON,             // Vcc to gnd (1 byte)
+            //
+            // 2. Apply 4.5 - 5.5V between V CC and GND. Ensure
+            // that V CC reaches at least 1.8V within the next 20 μs.
+            SCR_VDD_GND_OFF,    // Vdd to float (1 byte)
+            SCR_VDD_ON,         // Vdd to power (1 byte)
+            SCR_BUSY_LED_ON,    // 1 byte
+            SCR_DELAY_SHORT(1), // Min delay is 21.3uS  (2 bytes)
+            SCR_BUSY_LED_OFF,   // 1 byte
+
+            CMD_END_OF_BUFFER};
+
+    if ((errorCode = pickit2_write_report(pgm, steps1_2)) < 0)
+    {
+        avrdude_message(MSG_INFO, "pickit2_write_report failed (Apply VDD - ec %d). %s\n", errorCode, usb_strerror());
+        return -1;
+    }
+
+    // Check Vdd is at least 1.8V
+    float vdd, vpp;
+    if ((errorCode = pickit2_read_voltages(pgm, &vdd, &vpp)) < 0)
+    {
+        return errorCode;
+    }
+
+    pickit2_read_status(pgm);
+
+    if (vdd < 1.8)
+    {
+        avrdude_message(MSG_INFO, "%s: Vdd is %.2f volts, the minimum is 1.8V\n", progname, vdd);
+        return -1;
+    }
+
+    unsigned char steps3_6[65] =
+        {
+            0,
+            //
+            CMD_EXEC_SCRIPT_2(11), // n bytes of script to run
+            // 3. Wait 20 - 60 μs, and apply 11.5 - 12.5V to RESET.
+            SCR_DELAY_SHORT(2), // 42.6uS  (2 bytes)
+            SCR_MCLR_GND_OFF,   // Vpp floating (1 byte)
+            SCR_VPP_PWM_ON,     // Charge pump on (1 byte)
+            SCR_DELAY_2(0.1),   // 100ms to build charge (2 bytes)
+            SCR_VPP_ON,         // Connect charge pump to Vpp (1)
+            // 4. Keep the Prog_enable pins unchanged for at least
+            // 10 μs after the High-voltage has been applied to
+            // ensure the Prog_enable Signature has been latched.
+            SCR_DELAY_SHORT(1), // 21.3uS (2)
+            // 5. Release the Prog_enable[2] pin to avoid drive
+            // contention on the Prog_enable[2]/SDO pin.
+            //
+            // Not sure what to do here!
+            //
+            // 6. Wait at least 300 μs before giving any
+            // serial instructions on SDI/SII.
+            SCR_DELAY_SHORT(14), // 319.5μs (2)
+
+            CMD_END_OF_BUFFER};
+
+    if ((errorCode = pickit2_write_report(pgm, steps3_6)) < 0)
+    {
+        avrdude_message(MSG_INFO, "pickit2_write_report failed (Apply Vpp - ec %d). %s\n", errorCode, usb_strerror());
+        return -1;
+    }
+
+    pickit2_report_voltages(pgm);
+
+    return 0;
+}
+
+/*
+ Low voltage serial programming initialisation.
+*/
+static int pickit2_lvsp_initialize(PROGRAMMER *pgm, AVRPART *p)
+{
+    avrdude_message(MSG_NOTICE, "%s: Using low voltage serial programming.\n", progname);
+
+    // set the pins, apply reset,
+    // TO DO: apply vtarget (if requested though -x option)
+    unsigned char report[65] =
+        {
+            0, CMD_SET_VDD_4(5),
+            CMD_SET_VPP_4(5),
+            CMD_EXEC_SCRIPT_2(24),
+            SCR_SPI_SETUP_PINS_4,                           // SDO, SDI, SCK
+            SCR_SET_ICSP_DELAY_2(PDATA(pgm)->clock_period), // slow down the SPI
+            SCR_VDD_ON,
+            SCR_MCLR_GND_OFF, // let reset float high
+            SCR_VPP_PWM_ON,
+            SCR_DELAY_2(.1),
+            SCR_VPP_ON,
+            SCR_DELAY_2(.1),
+            SCR_VPP_OFF,
+            SCR_DELAY_2(.01),
+
+            SCR_MCLR_GND_ON, // reset low - programming mode
+            SCR_DELAY_2(.1),
+
+            SCR_BUSY_LED_ON,
+            SCR_DELAY_2(.3),
+            SCR_BUSY_LED_OFF,
+
+            CMD_CLR_DLOAD_BUFF,
+            CMD_CLR_ULOAD_BUFF,
+
+            CMD_END_OF_BUFFER};
+
+    int errorCode = 0;
+    if ((errorCode = pickit2_write_report(pgm, report)) < 0)
+    {
+        avrdude_message(MSG_INFO, "pickit2_read_report failed (ec %d). %s\n", errorCode, usb_strerror());
+        return -1;
+    }
+
+    return 0;
+}
+
+static int pickit2_initialize(PROGRAMMER *pgm, AVRPART *p)
 {
     unsigned char temp[4];
     memset(temp, 0, sizeof(temp));
@@ -259,61 +572,31 @@ static int pickit2_initialize(PROGRAMMER * pgm, AVRPART * p)
 
     /* connect to target device -- we'll just ask for the firmware version */
     static const unsigned char report[65] = {0, CMD_GET_VERSION, CMD_END_OF_BUFFER};
-    if ((errorCode = pickit2_write_report(pgm, report)) > 0)
-    {
-        unsigned char report[65] = {0};
-        //memset(report, 0, sizeof(report));
-        if ((errorCode = pickit2_read_report(pgm, report)) >= 4)
-        {
-            avrdude_message(MSG_NOTICE, "%s: %s firmware version %d.%d.%d\n", progname, pgm->desc, (int)report[1], (int)report[2], (int)report[3]);
-
-            // set the pins, apply reset,
-            // TO DO: apply vtarget (if requested though -x option)
-            unsigned char report[65] =
-            {
-                0, CMD_SET_VDD_4(5),
-                CMD_SET_VPP_4(5),
-                CMD_EXEC_SCRIPT_2(24),
-                SCR_SPI_SETUP_PINS_4,   // SDO, SDI, SCK
-                SCR_SET_ICSP_DELAY_2(PDATA(pgm)->clock_period),    // slow down the SPI
-                SCR_VDD_ON,
-                SCR_MCLR_GND_OFF,       // let reset float high
-                SCR_VPP_PWM_ON,
-                SCR_DELAY_2(.1),
-                SCR_VPP_ON,
-                SCR_DELAY_2(.1),
-                SCR_VPP_OFF,
-                SCR_DELAY_2(.01),
-
-                SCR_MCLR_GND_ON,        // reset low - programming mode
-                SCR_DELAY_2(.1),
-
-                SCR_BUSY_LED_ON,
-                SCR_DELAY_2(.3),
-                SCR_BUSY_LED_OFF,
-
-                CMD_CLR_DLOAD_BUFF,
-                CMD_CLR_ULOAD_BUFF,
-
-                CMD_END_OF_BUFFER
-            };
-
-            if (pickit2_write_report(pgm, report) < 0)
-            {
-                avrdude_message(MSG_INFO, "pickit2_read_report failed (ec %d). %s\n", errorCode, usb_strerror());
-                return -1;
-            }
-        }
-        else
-        {
-            avrdude_message(MSG_INFO, "pickit2_read_report failed (ec %d). %s\n", errorCode, usb_strerror());
-            return -1;
-        }
-    }
-    else
+    if ((errorCode = pickit2_write_report(pgm, report)) <= 0)
     {
         avrdude_message(MSG_INFO, "pickit2_write_report failed (ec %d). %s\n", errorCode, usb_strerror());
         return -1;
+    }
+
+    unsigned char reportRead[65] = {0};
+    if ((errorCode = pickit2_read_report(pgm, reportRead)) >= 4)
+    {
+        avrdude_message(MSG_NOTICE, "%s: %s firmware version %d.%d.%d\n", progname, pgm->desc, (int)reportRead[1], (int)reportRead[2], (int)reportRead[3]);
+
+        // Check if high voltage programming is required
+        if (PDATA(pgm)->use_hvsp)
+        {
+            errorCode = pickit2_hvsp_initialize(pgm, p);
+        }
+        else
+        {
+            errorCode = pickit2_lvsp_initialize(pgm, p);
+        }
+
+        if (errorCode < 0)
+        {
+            return errorCode;
+        }
     }
 
     if (pgm->program_enable)
@@ -322,36 +605,35 @@ static int pickit2_initialize(PROGRAMMER * pgm, AVRPART * p)
         return -1;
 }
 
-static void pickit2_disable(PROGRAMMER * pgm)
+static void pickit2_disable(PROGRAMMER *pgm)
 {
     /* make sure all pins are floating & all voltages are off */
     static const unsigned char report[65] =
-    {
-        0, CMD_EXEC_SCRIPT_2(8),
-        SCR_SET_PINS_2(1,1,0,0),
-        SCR_SET_AUX_2(1,0),
-        SCR_MCLR_GND_OFF,
-        SCR_VPP_OFF,
-        SCR_VDD_OFF,
-        SCR_BUSY_LED_OFF,
-        CMD_END_OF_BUFFER
-    };
+        {
+            0, CMD_EXEC_SCRIPT_2(8),
+            SCR_SET_PINS_2(1, 1, 0, 0),
+            SCR_SET_AUX_2(1, 0),
+            SCR_MCLR_GND_OFF,
+            SCR_VPP_OFF,
+            SCR_VDD_OFF,
+            SCR_BUSY_LED_OFF,
+            CMD_END_OF_BUFFER};
 
     pickit2_write_report(pgm, report);
 
     return;
 }
 
-static void pickit2_enable(PROGRAMMER * pgm)
+static void pickit2_enable(PROGRAMMER *pgm)
 {
     /* Do nothing. */
 
     return;
 }
 
-static void pickit2_display(PROGRAMMER * pgm, const char * p)
+static void pickit2_display(PROGRAMMER *pgm, const char *p)
 {
-    DEBUG( "%s: Found \"%s\" version %d.%d.%d\n", progname, p, 1, 1, 1);
+    DEBUG("%s: Found \"%s\" version %d.%d.%d\n", progname, p, 1, 1, 1);
     return;
 }
 
@@ -389,36 +671,42 @@ static int  pickit2_err_led(struct programmer_t * pgm, int value)
 }
 #endif
 
-static int  pickit2_pgm_led (struct programmer_t * pgm, int value)
+static int pickit2_pgm_led(struct programmer_t *pgm, int value)
 {
     // script to set busy led appropriately
     uint8_t report[65] = {0, CMD_EXEC_SCRIPT_2(1),
-                        value ? SCR_BUSY_LED_ON : SCR_BUSY_LED_OFF,
-                        CMD_END_OF_BUFFER
-                       };
+                          value ? SCR_BUSY_LED_ON : SCR_BUSY_LED_OFF,
+                          CMD_END_OF_BUFFER};
 
     return pickit2_write_report(pgm, report) != -1;
 }
 
-static int  pickit2_vfy_led        (struct programmer_t * pgm, int value)
+static int pickit2_vfy_led(struct programmer_t *pgm, int value)
 {
     // no such thing - maybe just call pgm_led
 
     return pgm->pgm_led(pgm, value);
 }
 
-static void pickit2_powerup(struct programmer_t * pgm)
+static void pickit2_powerup(struct programmer_t *pgm)
 {
     // turn vdd on?
 }
 
-static void pickit2_powerdown(struct programmer_t * pgm)
+static void pickit2_powerdown(struct programmer_t *pgm)
 {
     // do what?
     pgm->disable(pgm);
 }
 
-static int  pickit2_program_enable(struct programmer_t * pgm, AVRPART * p)
+static int pickit2_hvsp_program_enable(struct programmer_t *pgm, AVRPART *p)
+{
+    avrdude_message(MSG_NOTICE, "In HVSP PROGRAM ENABLE\n");
+    // TODO 7. Exit Programming mode by power the device down or by bringing RESET pin to 0V.
+    return 0; // not implemented yet
+}
+
+static int pickit2_lvsp_program_enable(struct programmer_t *pgm, AVRPART *p)
 {
     unsigned char cmd[4];
     unsigned char res[4];
@@ -426,7 +714,7 @@ static int  pickit2_program_enable(struct programmer_t * pgm, AVRPART * p)
     if (p->op[AVR_OP_PGM_ENABLE] == NULL)
     {
         avrdude_message(MSG_INFO, "program enable instruction not defined for part \"%s\"\n",
-                p->desc);
+                        p->desc);
         return -1;
     }
 
@@ -452,15 +740,66 @@ static int  pickit2_program_enable(struct programmer_t * pgm, AVRPART * p)
     return 0;
 }
 
-static int  pickit2_chip_erase(struct programmer_t * pgm, AVRPART * p)
+static int pickit2_program_enable(struct programmer_t *pgm, AVRPART *p)
 {
+    int errorCode = 0;
+
+    // Check if high voltage programming is required
+    if (PDATA(pgm)->use_hvsp)
+    {
+        errorCode = pickit2_hvsp_program_enable(pgm, p);
+    }
+    else
+    {
+        errorCode = pickit2_lvsp_program_enable(pgm, p);
+    }
+
+    return errorCode;
+}
+
+/*
+  Performs the High-voltage Serial Programming algorithm to erase a chip.
+
+  This will de-brick a device that's had the fuses set to something "not right"!
+
+  Note: only supported for ATtiny25/45/85 just now as that's what I need it for.
+*/
+static int pickit2_hvsp_chip_erase(struct programmer_t *pgm, AVRPART *p)
+{
+    // The initialisation code checks that the AVR device is supported
+    // so we don't get here if it isn't.
+
+    avrdude_message(MSG_INFO, "HVP Erase set to de-brick \"%s\"\n", p->desc);
+
+    unsigned char cmd[4];
+    unsigned char res[4];
+
+    pgm->pgm_led(pgm, ON);
+
+    memset(cmd, 0, sizeof(cmd));
+
+    avr_set_bits(p->op[AVR_OP_CHIP_ERASE], cmd);
+    pgm->cmd(pgm, cmd, res);
+    usleep(p->chip_erase_delay);
+    pgm->initialize(pgm, p);
+
+    pgm->pgm_led(pgm, OFF);
+
+    return 0;
+}
+
+static int pickit2_lvsp_chip_erase(struct programmer_t *pgm, AVRPART *p)
+{
+    avrdude_message(MSG_INFO, "In lvsp chip erase for part \"%s\"\n",
+                    p->desc);
+
     unsigned char cmd[4];
     unsigned char res[4];
 
     if (p->op[AVR_OP_CHIP_ERASE] == NULL)
     {
         avrdude_message(MSG_INFO, "chip erase instruction not defined for part \"%s\"\n",
-                p->desc);
+                        p->desc);
         return -1;
     }
 
@@ -478,8 +817,23 @@ static int  pickit2_chip_erase(struct programmer_t * pgm, AVRPART * p)
     return 0;
 }
 
-static int  pickit2_paged_load(PROGRAMMER * pgm, AVRPART * p, AVRMEM * mem,
-                        unsigned int page_size, unsigned int addr, unsigned int n_bytes)
+static int pickit2_chip_erase(struct programmer_t *pgm, AVRPART *p)
+{
+    avrdude_message(MSG_INFO, "In chip erase for part \"%s\"\n",
+                    p->desc);
+
+    if (PDATA(pgm)->use_hvsp)
+    {
+        return pickit2_hvsp_chip_erase(pgm, p);
+    }
+    else
+    {
+        return pickit2_lvsp_chip_erase(pgm, p);
+    }
+}
+
+static int pickit2_paged_load(PROGRAMMER *pgm, AVRPART *p, AVRMEM *mem,
+                              unsigned int page_size, unsigned int addr, unsigned int n_bytes)
 {
     // only supporting flash & eeprom page reads
     if ((!mem->paged || page_size <= 1) || (strcmp(mem->desc, "flash") != 0 && strcmp(mem->desc, "eeprom") != 0))
@@ -487,7 +841,7 @@ static int  pickit2_paged_load(PROGRAMMER * pgm, AVRPART * p, AVRMEM * mem,
         return -1;
     }
 
-    DEBUG( "paged read ps %d, mem %s\n", page_size, mem->desc);
+    DEBUG("paged read ps %d, mem %s\n", page_size, mem->desc);
 
     OPCODE *readop = 0, *lext = mem->op[AVR_OP_LOAD_EXT_ADDR];
     uint8_t data = 0, cmd[SPI_MAX_CHUNK], res[SPI_MAX_CHUNK];
@@ -496,10 +850,9 @@ static int  pickit2_paged_load(PROGRAMMER * pgm, AVRPART * p, AVRMEM * mem,
 
     pgm->pgm_led(pgm, ON);
 
-    for (addr_base = addr; addr_base < max_addr; )
+    for (addr_base = addr; addr_base < max_addr;)
     {
-        if ((addr_base == 0 || (addr_base % /*ext_address_boundary*/ 65536) == 0)
-                && lext != NULL)
+        if ((addr_base == 0 || (addr_base % /*ext_address_boundary*/ 65536) == 0) && lext != NULL)
         {
             memset(cmd, 0, sizeof(cmd));
 
@@ -540,11 +893,11 @@ static int  pickit2_paged_load(PROGRAMMER * pgm, AVRPART * p, AVRMEM * mem,
                 return -1;
             }
 
-            avr_set_bits(readop, &cmd[addr_off*4]);
-            avr_set_addr(readop, &cmd[addr_off*4], caddr);
+            avr_set_bits(readop, &cmd[addr_off * 4]);
+            avr_set_addr(readop, &cmd[addr_off * 4], caddr);
         }
 
-        int bytes_read = pgm->spi(pgm, cmd, res, blockSize*4);
+        int bytes_read = pgm->spi(pgm, cmd, res, blockSize * 4);
 
         if (bytes_read < 0)
         {
@@ -553,17 +906,17 @@ static int  pickit2_paged_load(PROGRAMMER * pgm, AVRPART * p, AVRMEM * mem,
             return -1;
         }
 
-        DEBUG( "\npaged_load @ %X, wrote: %d, read: %d bytes\n", addr_base, blockSize*4, bytes_read);
+        DEBUG("\npaged_load @ %X, wrote: %d, read: %d bytes\n", addr_base, blockSize * 4, bytes_read);
 
         for (addr_off = 0; addr_off < bytes_read / 4; addr_off++)
         {
             data = 0;
-            avr_get_output(readop, &res[addr_off*4], &data);
+            avr_get_output(readop, &res[addr_off * 4], &data);
             mem->buf[addr_base + addr_off] = data;
 
-            DEBUG( "%2X(%c)", (int)data, data<0x20?'.':data);
+            DEBUG("%2X(%c)", (int)data, data < 0x20 ? '.' : data);
         }
-        DEBUG( "\n");
+        DEBUG("\n");
 
         addr_base += blockSize;
     }
@@ -573,11 +926,10 @@ static int  pickit2_paged_load(PROGRAMMER * pgm, AVRPART * p, AVRMEM * mem,
     return n_bytes;
 }
 
-
-static int pickit2_commit_page(PROGRAMMER * pgm, AVRPART * p, AVRMEM * mem,
-                        unsigned long addr)
+static int pickit2_commit_page(PROGRAMMER *pgm, AVRPART *p, AVRMEM *mem,
+                               unsigned long addr)
 {
-    OPCODE * wp, * lext;
+    OPCODE *wp, *lext;
 
     wp = mem->op[AVR_OP_WRITEPAGE];
     if (wp == NULL)
@@ -624,8 +976,8 @@ static int pickit2_commit_page(PROGRAMMER * pgm, AVRPART * p, AVRMEM * mem,
 }
 
 // not actually a paged write, but a bulk/batch write
-static int  pickit2_paged_write(PROGRAMMER * pgm, AVRPART * p, AVRMEM * mem,
-                         unsigned int page_size, unsigned int addr, unsigned int n_bytes)
+static int pickit2_paged_write(PROGRAMMER *pgm, AVRPART *p, AVRMEM *mem,
+                               unsigned int page_size, unsigned int addr, unsigned int n_bytes)
 {
     // only paged write for flash implemented
     if (strcmp(mem->desc, "flash") != 0 && strcmp(mem->desc, "eeprom") != 0)
@@ -634,8 +986,8 @@ static int  pickit2_paged_write(PROGRAMMER * pgm, AVRPART * p, AVRMEM * mem,
         return -1;
     }
 
-    DEBUG( "page size %d mem %s supported: %d\n", page_size, mem->desc, mem->paged);
-    DEBUG( "loadpagehi %x, loadpagelow %x, writepage %x\n", (int)mem->op[AVR_OP_LOADPAGE_HI], (int)mem->op[AVR_OP_LOADPAGE_LO], (int)mem->op[AVR_OP_WRITEPAGE]);
+    DEBUG("page size %d mem %s supported: %d\n", page_size, mem->desc, mem->paged);
+    DEBUG("loadpagehi %x, loadpagelow %x, writepage %x\n", (int)mem->op[AVR_OP_LOADPAGE_HI], (int)mem->op[AVR_OP_LOADPAGE_LO], (int)mem->op[AVR_OP_WRITEPAGE]);
 
     OPCODE *writeop;
     uint8_t cmd[SPI_MAX_CHUNK], res[SPI_MAX_CHUNK];
@@ -644,13 +996,13 @@ static int  pickit2_paged_write(PROGRAMMER * pgm, AVRPART * p, AVRMEM * mem,
 
     pgm->pgm_led(pgm, ON);
 
-    for (addr_base = addr; addr_base < max_addr; )
+    for (addr_base = addr; addr_base < max_addr;)
     {
         uint32_t blockSize;
 
         if (mem->paged)
         {
-            blockSize = MIN(page_size - (addr_base % page_size), MIN(max_addr - addr_base, SPI_MAX_CHUNK/4) );     // bytes remaining in page
+            blockSize = MIN(page_size - (addr_base % page_size), MIN(max_addr - addr_base, SPI_MAX_CHUNK / 4)); // bytes remaining in page
         }
         else
         {
@@ -685,7 +1037,7 @@ static int  pickit2_paged_write(PROGRAMMER * pgm, AVRPART * p, AVRMEM * mem,
             else if (mem->op[AVR_OP_WRITE_LO])
             {
                 writeop = mem->op[AVR_OP_WRITE_LO];
-                caddr = addr;       // maybe this should divide by 2 & use the write_high opcode also
+                caddr = addr; // maybe this should divide by 2 & use the write_high opcode also
 
                 avrdude_message(MSG_INFO, "Error AVR_OP_WRITE_LO defined only (where's the HIGH command?)\n");
                 return -1;
@@ -703,12 +1055,12 @@ static int  pickit2_paged_write(PROGRAMMER * pgm, AVRPART * p, AVRMEM * mem,
                 return -1;
             }
 
-            avr_set_bits(writeop, &cmd[addr_off*4]);
-            avr_set_addr(writeop, &cmd[addr_off*4], caddr);
-            avr_set_input(writeop, &cmd[addr_off*4], mem->buf[addr]);
+            avr_set_bits(writeop, &cmd[addr_off * 4]);
+            avr_set_addr(writeop, &cmd[addr_off * 4], caddr);
+            avr_set_input(writeop, &cmd[addr_off * 4], mem->buf[addr]);
         }
 
-        int bytes_read = pgm->spi(pgm, cmd, res, blockSize*4);
+        int bytes_read = pgm->spi(pgm, cmd, res, blockSize * 4);
 
         if (bytes_read < 0)
         {
@@ -722,8 +1074,8 @@ static int  pickit2_paged_write(PROGRAMMER * pgm, AVRPART * p, AVRMEM * mem,
         // write the page - this function looks after extended address also
         if (mem->paged && (((addr_base % page_size) == 0) || (addr_base == max_addr)))
         {
-            DEBUG( "Calling pickit2_commit_page()\n");
-            pickit2_commit_page(pgm, p, mem, addr_base-1);
+            DEBUG("Calling pickit2_commit_page()\n");
+            pickit2_commit_page(pgm, p, mem, addr_base - 1);
         }
         else if (!mem->paged)
         {
@@ -736,16 +1088,15 @@ static int  pickit2_paged_write(PROGRAMMER * pgm, AVRPART * p, AVRMEM * mem,
     return n_bytes;
 }
 
-
-static int pickit2_cmd(struct programmer_t * pgm, const unsigned char *cmd,
-                unsigned char *res)
+static int pickit2_cmd(struct programmer_t *pgm, const unsigned char *cmd,
+                       unsigned char *res)
 {
     return pgm->spi(pgm, cmd, res, 4);
 }
 
 // breaks up the cmd[] data into  packets & sends to the pickit2. Data shifted in is stored in res[].
-static int pickit2_spi(struct programmer_t * pgm, const unsigned char *cmd,
-                unsigned char *res, int n_bytes)
+static int pickit2_spi(struct programmer_t *pgm, const unsigned char *cmd,
+                       unsigned char *res, int n_bytes)
 {
     int retval = 0, temp1 = 0, temp2 = 0, count = n_bytes;
 
@@ -761,21 +1112,21 @@ static int pickit2_spi(struct programmer_t * pgm, const unsigned char *cmd,
         for (i = 0; i < blockSize; i++)
         {
             *repptr++ = *cmd++;
-            count--;    // 1 less byte to pack
+            count--; // 1 less byte to pack
         }
 
         if (blockSize == 1)
         {
-            *repptr++ = 0xa6;       //CMD_EXECUTE_SCRIPT;
+            *repptr++ = 0xa6; //CMD_EXECUTE_SCRIPT;
             *repptr++ = 1;
             *repptr++ = SCR_SPI;
         }
         else
         {
-            *repptr++ = 0xa6;       //CMD_EXECUTE_SCRIPT_2;
+            *repptr++ = 0xa6; //CMD_EXECUTE_SCRIPT_2;
             *repptr++ = 4;
             *repptr++ = SCR_SPI;
-            *repptr++ = 0xe9;       //SCR_LOOP_3;
+            *repptr++ = 0xe9; //SCR_LOOP_3;
             *repptr++ = 1;
             *repptr++ = blockSize - 1;
         }
@@ -784,11 +1135,11 @@ static int pickit2_spi(struct programmer_t * pgm, const unsigned char *cmd,
         *repptr++ = CMD_UPLOAD_DATA;
 
         // check return values
-        if ((temp1=pickit2_write_report(pgm, report)) < 0 ||
-                (temp2=pickit2_read_report(pgm, report)) < 0)
+        if ((temp1 = pickit2_write_report(pgm, report)) < 0 ||
+            (temp2 = pickit2_read_report(pgm, report)) < 0)
         {
             return -1;
-        }/*
+        } /*
         else
         {
             int i;
@@ -802,10 +1153,10 @@ static int pickit2_spi(struct programmer_t * pgm, const unsigned char *cmd,
             DEBUG( "\n");
         }*/
 
-        retval = report[1]; // upload-length field
-        repptr = &report[2];    // actual data starts here
+        retval = report[1];  // upload-length field
+        repptr = &report[2]; // actual data starts here
 
-        if (res)                // copy data if user has specified a storage location
+        if (res) // copy data if user has specified a storage location
         {
             memcpy(res, repptr, retval);
             res += retval;
@@ -831,22 +1182,22 @@ static int pickit2_spi(struct programmer_t * pgm, const unsigned char *cmd,
 static HANDLE open_hid(unsigned short vid, unsigned short pid)
 {
     //Use a series of API calls to find a HID with a specified Vendor IF and Product ID.
-    HANDLE                              returnHandle = INVALID_HANDLE_VALUE;
-    HIDD_ATTRIBUTES                     Attributes;
-//    DWORD                               DeviceUsage;
-    SP_DEVICE_INTERFACE_DATA            devInfoData;
-    BOOL                                LastDevice = FALSE;
-    int                                 MemberIndex = 0;
-    LONG                                Result;
+    HANDLE returnHandle = INVALID_HANDLE_VALUE;
+    HIDD_ATTRIBUTES Attributes;
+    //    DWORD                               DeviceUsage;
+    SP_DEVICE_INTERFACE_DATA devInfoData;
+    BOOL LastDevice = FALSE;
+    int MemberIndex = 0;
+    LONG Result;
 
     // were global, now just local scrap
-    DWORD                               Length = 0;
-    PSP_DEVICE_INTERFACE_DETAIL_DATA    detailData = NULL;
-    HANDLE                              DeviceHandle=NULL;
-    GUID                                HidGuid;
-    HANDLE                              hDevInfo;
-    ULONG                               Required;
-    BOOL                                MyDeviceDetected = 0;
+    DWORD Length = 0;
+    PSP_DEVICE_INTERFACE_DETAIL_DATA detailData = NULL;
+    HANDLE DeviceHandle = NULL;
+    GUID HidGuid;
+    HANDLE hDevInfo;
+    ULONG Required;
+    BOOL MyDeviceDetected = 0;
 
     /*
     API function: HidD_GetHidGuid
@@ -863,11 +1214,10 @@ static HANDLE open_hid(unsigned short vid, unsigned short pid)
     Requires: the GUID returned by GetHidGuid.
     */
 
-    hDevInfo=SetupDiGetClassDevs
-             (&HidGuid,
-              NULL,
-              NULL,
-              DIGCF_PRESENT|DIGCF_INTERFACEDEVICE);
+    hDevInfo = SetupDiGetClassDevs(&HidGuid,
+                                   NULL,
+                                   NULL,
+                                   DIGCF_PRESENT | DIGCF_INTERFACEDEVICE);
 
     DEBUG("\nSetupDiGetClassDevs returned 0x%x\n", hDevInfo);
     devInfoData.cbSize = sizeof(devInfoData);
@@ -890,13 +1240,11 @@ static HANDLE open_hid(unsigned short vid, unsigned short pid)
         An index to specify a device.
         */
 
-
-        Result=SetupDiEnumDeviceInterfaces
-               (hDevInfo,
-                0,
-                &HidGuid,
-                MemberIndex,
-                &devInfoData);
+        Result = SetupDiEnumDeviceInterfaces(hDevInfo,
+                                             0,
+                                             &HidGuid,
+                                             MemberIndex,
+                                             &devInfoData);
 
         DEBUG("\nSetupDiEnumDeviceInterfaces returned 0x%x\n", Result);
 
@@ -924,13 +1272,12 @@ static HANDLE open_hid(unsigned short vid, unsigned short pid)
 
             //Get the Length value.
             //The call will return with a "buffer too small" error which can be ignored.
-            Result = SetupDiGetDeviceInterfaceDetail
-                     (hDevInfo,
-                      &devInfoData,
-                      NULL,
-                      0,
-                      &Length,
-                      NULL);
+            Result = SetupDiGetDeviceInterfaceDetail(hDevInfo,
+                                                     &devInfoData,
+                                                     NULL,
+                                                     0,
+                                                     &Length,
+                                                     NULL);
 
             DEBUG("\nSetupDiGetDeviceInterfaceDetail returned 0x%x\n", Result);
 
@@ -940,17 +1287,16 @@ static HANDLE open_hid(unsigned short vid, unsigned short pid)
 
             //Set cbSize in the detailData structure.
 
-            detailData -> cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA);
+            detailData->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA);
 
             //Call the function again, this time passing it the returned buffer size.
 
-            Result = SetupDiGetDeviceInterfaceDetail
-                     (hDevInfo,
-                      &devInfoData,
-                      detailData,
-                      Length,
-                      &Required,
-                      NULL);
+            Result = SetupDiGetDeviceInterfaceDetail(hDevInfo,
+                                                     &devInfoData,
+                                                     detailData,
+                                                     Length,
+                                                     &Required,
+                                                     NULL);
 
             // Open a handle to the device.
             // To enable retrieving information about a system mouse or keyboard,
@@ -964,14 +1310,13 @@ static HANDLE open_hid(unsigned short vid, unsigned short pid)
             returned by SetupDiGetDeviceInterfaceDetail.
             */
 
-            DeviceHandle=CreateFile
-                         (detailData->DevicePath,
-                          0,
-                          FILE_SHARE_READ|FILE_SHARE_WRITE,
-                          (LPSECURITY_ATTRIBUTES)NULL,
-                          OPEN_EXISTING,
-                          0,
-                          NULL);
+            DeviceHandle = CreateFile(detailData->DevicePath,
+                                      0,
+                                      FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                      (LPSECURITY_ATTRIBUTES)NULL,
+                                      OPEN_EXISTING,
+                                      0,
+                                      NULL);
 
             DEBUG("CreateFile(): %s\n", detailData->DevicePath);
             /*
@@ -988,9 +1333,8 @@ static HANDLE open_hid(unsigned short vid, unsigned short pid)
 
             Attributes.Size = sizeof(Attributes);
 
-            Result = HidD_GetAttributes
-                     (DeviceHandle,
-                      &Attributes);
+            Result = HidD_GetAttributes(DeviceHandle,
+                                        &Attributes);
 
             DEBUG("HidD_GetAttributes returned 0x%x\n", Result);
             DEBUG("VID: %.4X PID: %.4X\n", Attributes.VendorID, Attributes.ProductID);
@@ -1007,14 +1351,13 @@ static HANDLE open_hid(unsigned short vid, unsigned short pid)
 
                     // Get a handle for us to use.
 
-                    returnHandle = CreateFile
-                                   (detailData->DevicePath,
-                                    GENERIC_WRITE | GENERIC_READ,
-                                    FILE_SHARE_READ|FILE_SHARE_WRITE,
-                                    (LPSECURITY_ATTRIBUTES)NULL,
-                                    OPEN_EXISTING,
-                                    FILE_FLAG_OVERLAPPED,
-                                    NULL);
+                    returnHandle = CreateFile(detailData->DevicePath,
+                                              GENERIC_WRITE | GENERIC_READ,
+                                              FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                              (LPSECURITY_ATTRIBUTES)NULL,
+                                              OPEN_EXISTING,
+                                              FILE_FLAG_OVERLAPPED,
+                                              NULL);
 
                 } //if (Attributes.ProductID == ProductID)
 
@@ -1034,12 +1377,12 @@ static HANDLE open_hid(unsigned short vid, unsigned short pid)
 
             free(detailData);
 
-        }  //if (Result != 0)
+        } //if (Result != 0)
 
         else
             //SetupDiEnumDeviceInterfaces returned 0, so there are no more devices to check.
 
-            LastDevice=TRUE;
+            LastDevice = TRUE;
 
         //If we haven't found the device yet, and haven't tried every available device,
         //try the next one.
@@ -1115,25 +1458,25 @@ static int usb_write_interrupt(PROGRAMMER *pgm, const void *buff, int size, int 
     return bytesWritten > 0 ? bytesWritten : -1;
 }
 
-static int pickit2_write_report(PROGRAMMER * pgm, const unsigned char report[65])
+static int pickit2_write_report(PROGRAMMER *pgm, const unsigned char report[65])
 {
     return usb_write_interrupt(pgm, report, 65, PDATA(pgm)->transaction_timeout); // XXX
 }
 
-static int pickit2_read_report(PROGRAMMER * pgm, unsigned char report[65])
+static int pickit2_read_report(PROGRAMMER *pgm, unsigned char report[65])
 {
     return usb_read_interrupt(pgm, report, 65, PDATA(pgm)->transaction_timeout);
 }
 
-#else   // WIN32NATIVE
+#else  // WIN32NATIVE
 /* taken (modified) from avrdude usbasp.c */
 static int usb_open_device(struct usb_dev_handle **device, int vendor, int product)
 {
-    struct usb_bus      *bus;
-    struct usb_device   *dev;
-    usb_dev_handle      *handle = NULL;
-    int                 errorCode = USB_ERROR_NOTFOUND;
-    static int          didUsbInit = 0;
+    struct usb_bus *bus;
+    struct usb_device *dev;
+    usb_dev_handle *handle = NULL;
+    int errorCode = USB_ERROR_NOTFOUND;
+    static int didUsbInit = 0;
 
     if (!didUsbInit)
     {
@@ -1142,11 +1485,11 @@ static int usb_open_device(struct usb_dev_handle **device, int vendor, int produ
     }
     usb_find_busses();
     usb_find_devices();
-    for (bus=usb_get_busses(); bus; bus=bus->next)
+    for (bus = usb_get_busses(); bus; bus = bus->next)
     {
-        for (dev=bus->devices; dev; dev=dev->next)
+        for (dev = bus->devices; dev; dev = dev->next)
         {
-            DEBUG( "Enumerating device list.. VID: 0x%4.4x, PID: 0x%4.4x\n", dev->descriptor.idVendor, dev->descriptor.idProduct);
+            DEBUG("Enumerating device list.. VID: 0x%4.4x, PID: 0x%4.4x\n", dev->descriptor.idVendor, dev->descriptor.idProduct);
             if (dev->descriptor.idVendor == vendor && dev->descriptor.idProduct == product)
             {
                 /* we need to open the device in order to query strings */
@@ -1166,13 +1509,15 @@ static int usb_open_device(struct usb_dev_handle **device, int vendor, int produ
                     if ((errorCode = usb_set_configuration(handle, 1)) < 0)
                     {
                         avrdude_message(MSG_INFO, "Could not set configuration. Error code %d, %s.\n"
-                                "You may need to run avrdude as root or set up correct usb port permissions.", errorCode, usb_strerror());
+                                                  "You may need to run avrdude as root or set up correct usb port permissions.",
+                                        errorCode, usb_strerror());
                     }
 
                     if ((errorCode = usb_claim_interface(handle, 0)) < 0)
                     {
                         avrdude_message(MSG_INFO, "Could not claim interface. Error code %d, %s\n"
-                                "You may need to run avrdude as root or set up correct usb port permissions.", errorCode, usb_strerror());
+                                                  "You may need to run avrdude as root or set up correct usb port permissions.",
+                                        errorCode, usb_strerror());
                     }
 
                     errorCode = 0;
@@ -1186,20 +1531,20 @@ static int usb_open_device(struct usb_dev_handle **device, int vendor, int produ
     return -1;
 }
 
-static int pickit2_write_report(PROGRAMMER * pgm, const unsigned char report[65])
+static int pickit2_write_report(PROGRAMMER *pgm, const unsigned char report[65])
 {
     // endpoint 1 OUT??
-    return usb_interrupt_write(PDATA(pgm)->usb_handle, USB_ENDPOINT_OUT | 1, (const char*)(report+1), 64, PDATA(pgm)->transaction_timeout);
+    return usb_interrupt_write(PDATA(pgm)->usb_handle, USB_ENDPOINT_OUT | 1, (const char *)(report + 1), 64, PDATA(pgm)->transaction_timeout);
 }
 
-static int pickit2_read_report(PROGRAMMER * pgm, unsigned char report[65])
+static int pickit2_read_report(PROGRAMMER *pgm, unsigned char report[65])
 {
     // endpoint 1 IN??
-    return usb_interrupt_read(PDATA(pgm)->usb_handle, USB_ENDPOINT_IN | 1, (char*)(report+1), 64, PDATA(pgm)->transaction_timeout);
+    return usb_interrupt_read(PDATA(pgm)->usb_handle, USB_ENDPOINT_IN | 1, (char *)(report + 1), 64, PDATA(pgm)->transaction_timeout);
 }
-#endif  // WIN323NATIVE
+#endif // WIN323NATIVE
 
-static int  pickit2_parseextparams(struct programmer_t * pgm, LISTID extparms)
+static int pickit2_parseextparams(struct programmer_t *pgm, LISTID extparms)
 {
     LNODEID ln;
     const char *extended_param;
@@ -1220,11 +1565,11 @@ static int  pickit2_parseextparams(struct programmer_t * pgm, LISTID extparms)
                 continue;
             }
 
-            int clock_period = MIN(1000000 / clock_rate, 255);    // max period is 255
-            clock_rate = (int)(1000000 / (clock_period + 5e-7));    // assume highest speed is 2MHz - should probably check this
+            int clock_period = MIN(1000000 / clock_rate, 255);   // max period is 255
+            clock_rate = (int)(1000000 / (clock_period + 5e-7)); // assume highest speed is 2MHz - should probably check this
 
             avrdude_message(MSG_NOTICE2, "%s: pickit2_parseextparms(): clockrate set to 0x%02x\n",
-                                progname, clock_rate);
+                            progname, clock_rate);
             PDATA(pgm)->clock_period = clock_period;
 
             continue;
@@ -1242,8 +1587,27 @@ static int  pickit2_parseextparams(struct programmer_t * pgm, LISTID extparms)
             }
 
             avrdude_message(MSG_NOTICE2, "%s: pickit2_parseextparms(): usb timeout set to 0x%02x\n",
-                                progname, timeout);
+                            progname, timeout);
             PDATA(pgm)->transaction_timeout = timeout;
+
+            continue;
+        }
+
+        // High-voltage serial programming
+        if (strncmp(extended_param, "hvsp=", strlen("hvsp=")) == 0)
+        {
+            int useHvsp;
+            if (sscanf(extended_param, "hvsp=%i", &useHvsp) != 1 || useHvsp < 0 || useHvsp > 1)
+            {
+                avrdude_message(MSG_INFO, "%s: pickit2_parseextparms(): invalid hvsp value (must be 0 or 1) '%s'\n",
+                                progname, extended_param);
+                rv = -1;
+                continue;
+            }
+
+            avrdude_message(MSG_NOTICE2, "%s: pickit2_parseextparms(): use high voltage programming set to 0x%02x\n",
+                            progname, useHvsp);
+            PDATA(pgm)->use_hvsp = useHvsp;
 
             continue;
         }
@@ -1256,27 +1620,26 @@ static int  pickit2_parseextparams(struct programmer_t * pgm, LISTID extparms)
     return rv;
 }
 
-
-void pickit2_initpgm (PROGRAMMER * pgm)
+void pickit2_initpgm(PROGRAMMER *pgm)
 {
     /*
      * mandatory functions - these are called without checking to see
      * whether they are assigned or not
      */
 
-    pgm->initialize     = pickit2_initialize;
-    pgm->display        = pickit2_display;
-    pgm->enable         = pickit2_enable;
-    pgm->disable        = pickit2_disable;
-    pgm->powerup        = pickit2_powerup;
-    pgm->powerdown      = pickit2_powerdown;
+    pgm->initialize = pickit2_initialize;
+    pgm->display = pickit2_display;
+    pgm->enable = pickit2_enable;
+    pgm->disable = pickit2_disable;
+    pgm->powerup = pickit2_powerup;
+    pgm->powerdown = pickit2_powerdown;
     pgm->program_enable = pickit2_program_enable;
-    pgm->chip_erase     = pickit2_chip_erase;
-    pgm->open           = pickit2_open;
-    pgm->close          = pickit2_close;
+    pgm->chip_erase = pickit2_chip_erase;
+    pgm->open = pickit2_open;
+    pgm->close = pickit2_close;
 
-    pgm->read_byte      = avr_read_byte_default;
-    pgm->write_byte     = avr_write_byte_default;
+    pgm->read_byte = avr_read_byte_default;
+    pgm->write_byte = avr_write_byte_default;
 
     /*
      * predefined functions - these functions have a valid default
@@ -1285,18 +1648,18 @@ void pickit2_initpgm (PROGRAMMER * pgm)
      */
     //pgm->rdy_led        = pickit2_rdy_led;
     //pgm->err_led        = pickit2_err_led;
-    pgm->pgm_led        = pickit2_pgm_led;
-    pgm->vfy_led        = pickit2_vfy_led;
+    pgm->pgm_led = pickit2_pgm_led;
+    pgm->vfy_led = pickit2_vfy_led;
 
     /*
      * optional functions - these are checked to make sure they are
      * assigned before they are called
      */
 
-    pgm->cmd            = pickit2_cmd;
-    pgm->spi            = pickit2_spi;
-    pgm->paged_write    = pickit2_paged_write;
-    pgm->paged_load     = pickit2_paged_load;
+    pgm->cmd = pickit2_cmd;
+    pgm->spi = pickit2_spi;
+    pgm->paged_write = pickit2_paged_write;
+    pgm->paged_load = pickit2_paged_load;
     //pgm->write_setup    = NULL;
     //pgm->read_sig_bytes = NULL;
     //pgm->set_vtarget    = NULL;//pickit2_vtarget;
@@ -1306,33 +1669,34 @@ void pickit2_initpgm (PROGRAMMER * pgm)
 
     pgm->parseextparams = pickit2_parseextparams;
 
-    pgm->setup          = pickit2_setup;
-    pgm->teardown       = pickit2_teardown;
+    pgm->setup = pickit2_setup;
+    pgm->teardown = pickit2_teardown;
     // pgm->page_size      = 256;        // not sure what this does... maybe the max page size that the page read/write function can handle
 
     strncpy(pgm->type, "pickit2", sizeof(pgm->type));
 }
 #else
-static int pickit2_nousb_open (struct programmer_t *pgm, char * name) {
-    avrdude_message(MSG_INFO, 
+static int pickit2_nousb_open(struct programmer_t *pgm, char *name)
+{
+    avrdude_message(MSG_INFO,
 #ifdef WIN32NATIVE
-            "%s: error: no usb or hid support. Please compile again with libusb or HID support from Win32 DDK installed.\n",
+                    "%s: error: no usb or hid support. Please compile again with libusb or HID support from Win32 DDK installed.\n",
 #else
-            "%s: error: no usb support. Please compile again with libusb installed.\n",
+                    "%s: error: no usb support. Please compile again with libusb installed.\n",
 #endif
-            progname);
+                    progname);
 
     return -1;
 }
 
-void pickit2_initpgm (PROGRAMMER * pgm)
+void pickit2_initpgm(PROGRAMMER *pgm)
 {
     /*
      * mandatory functions - these are called without checking to see
      * whether they are assigned or not
      */
 
-    pgm->open           = pickit2_nousb_open;
+    pgm->open = pickit2_nousb_open;
 
     strncpy(pgm->type, "pickit2", sizeof(pgm->type));
 }
@@ -1340,4 +1704,3 @@ void pickit2_initpgm (PROGRAMMER * pgm)
 #endif /* defined(HAVE_LIBUSB) || (defined(WIN32NATIVE) && defined(HAVE_LIBHID)) */
 
 const char pickit2_desc[] = "Microchip's PICkit2 Programmer";
-
